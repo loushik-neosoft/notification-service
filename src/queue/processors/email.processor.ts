@@ -4,6 +4,8 @@ import { IEmailRepository } from '@/database/repositories/email.repository.inter
 import { ProviderService } from '@/services/provider.service';
 import { ProviderFactory } from '@/providers/provider.factory';
 import { decrypt } from '@/utils/encryption';
+import { RoundRobinStrategy } from '@/services/provider-selection.strategy';
+import { RateLimiterUtils } from '@/utils/rate-limiter';
 
 export class EmailProcessor {
     constructor(
@@ -16,11 +18,14 @@ export class EmailProcessor {
         await this.repository.updateStatus(emailId, EmailStatus.PROCESSING);
 
         try {
-            const providers = await this.providerService.getActiveProviders();
+            const activeProviders = await this.providerService.getActiveProviders();
 
-            if (providers.length === 0) {
+            if (activeProviders.length === 0) {
                 throw new Error('No active providers available');
             }
+
+            const strategy = new RoundRobinStrategy();
+            const providers = await strategy.selectProviders(activeProviders);
 
             let emailSent = false;
 
@@ -37,6 +42,17 @@ export class EmailProcessor {
 
                     if (!provider) {
                         console.warn(`Skipping unknown provider type: ${providerData.type}`);
+                        continue;
+                    }
+
+                    // Check Rate Limit
+                    const rateLimit = provider.getRateLimit();
+                    // Default to 1 second window. Provider config could specify window size in future.
+                    const isAllowed = await RateLimiterUtils.checkRateLimit(providerData.name, rateLimit, 1);
+
+                    if (!isAllowed) {
+                        console.warn(`Rate limit exceeded for provider ${providerData.name}. Skipping.`);
+                        await this.repository.addAttempt(emailId, providerData.name, 'RATE_LIMIT_EXCEEDED', 'Rate limit exceeded');
                         continue;
                     }
 

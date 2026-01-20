@@ -1,16 +1,35 @@
-import { EmailRequest, ProviderType } from "@/types";
+import { ProviderType } from "@/types";
+import { Selectable } from "kysely";
+import { Providers } from "@/database/types";
+import redisClient from "@/utils/redis"; // Using existing redis client
 
 export interface IProviderSelectionStrategy {
-    selectProvider(request: EmailRequest): string;
+    selectProviders(providers: Selectable<Providers>[]): Promise<Selectable<Providers>[]>;
 }
 
 export class RoundRobinStrategy implements IProviderSelectionStrategy {
-    private providers: string[] = [ProviderType.SENDGRID, ProviderType.SMTP];
-    private currentIndex = 0;
 
-    selectProvider(request: EmailRequest): string {
-        const provider = this.providers[this.currentIndex];
-        this.currentIndex = (this.currentIndex + 1) % this.providers.length;
-        return provider;
+    async selectProviders(providers: Selectable<Providers>[]): Promise<Selectable<Providers>[]> {
+        if (providers.length <= 1) return providers;
+
+        const key = 'provider:round_robin:index';
+
+        try {
+            // Increment global counter to rotate starting position
+            const index = await redisClient.incr(key);
+
+            // Calculate starting offset
+            const startOffset = index % providers.length;
+
+            // Rotate the array based on the offset
+            return [
+                ...providers.slice(startOffset),
+                ...providers.slice(0, startOffset)
+            ];
+        } catch (error) {
+            console.error('RoundRobinStrategy redis error:', error);
+            // Fallback to original order on error
+            return providers;
+        }
     }
 }
